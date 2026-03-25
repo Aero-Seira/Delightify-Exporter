@@ -1,7 +1,0 @@
-Java Launcher: /Users/aeroseira/.sdkman/candidates/java/17.0.18-zulu/zulu-17.jdk/Contents/Home/bin/java
-Arguments: '--inJar, /Users/aeroseira/.gradle/caches/forge_gradle/minecraft_user_repo/net/minecraftforge/forge/1.20.1-47.4.18/forge-1.20.1-47.4.18-injected.jar, --outJar, /Users/aeroseira/.gradle/caches/forge_gradle/minecraft_user_repo/net/minecraftforge/forge/1.20.1-47.4.18_mapped_official_1.20.1/forge-1.20.1-47.4.18_mapped_official_1.20.1.jar, --logFile, accesstransform.log, --atFile, /Users/aeroseira/IdeaProjects/Delightify-Exporter/build/_atJar_4/parent_at.cfg'
-Classpath:
- - /Users/aeroseira/.gradle/caches/forge_gradle/maven_downloader/net/minecraftforge/accesstransformers/8.2.14/accesstransformers-8.2.14-fatjar.jar
-Working directory: /Users/aeroseira/IdeaProjects/Delightify-Exporter/build/_atJar_4
-Main class: net.minecraftforge.accesstransformer.TransformerProcessor
-====================================
