@@ -2,11 +2,13 @@ package io.github.aeroseira.delightify_exporter.export;
 
 import com.mojang.logging.LogUtils;
 import io.github.aeroseira.delightify_exporter.db.SqliteDatabase;
+import io.github.aeroseira.delightify_exporter.model.ItemResourceRow;
 import io.github.aeroseira.delightify_exporter.model.ItemRow;
 import io.github.aeroseira.delightify_exporter.model.ItemTagRow;
 import io.github.aeroseira.delightify_exporter.model.ModRow;
 import io.github.aeroseira.delightify_exporter.model.RecipeRow;
 import io.github.aeroseira.delightify_exporter.source.ItemRegistrySource;
+import io.github.aeroseira.delightify_exporter.source.ItemResourceSource;
 import io.github.aeroseira.delightify_exporter.source.ItemTagSource;
 import io.github.aeroseira.delightify_exporter.source.ModListSource;
 import io.github.aeroseira.delightify_exporter.source.RecipeSource;
@@ -30,7 +32,7 @@ public class ExporterService {
         long startTime = System.currentTimeMillis();
         
         // 确定输出路径: <game_root>/delightify-exporter/export_<timestamp>.sqlite
-        Path gameRoot = server.getServerDirectory();
+        Path gameRoot = server.getServerDirectory().toPath();
         Path outputDir = gameRoot.resolve(OUTPUT_DIR);
         String timestamp = LocalDateTime.now().format(FILE_NAME_FORMATTER);
         String dbFileName = "export_" + timestamp + ".sqlite";
@@ -68,6 +70,12 @@ public class ExporterService {
             List<RecipeRow> recipes = new RecipeSource().collect(server);
             db.insertRecipes(recipes);
             LOGGER.info("Exported {} recipes in {}ms", recipes.size(), System.currentTimeMillis() - recipesStart);
+            
+            // 导出物品资源元数据
+            long resourcesStart = System.currentTimeMillis();
+            List<ItemResourceRow> resources = new ItemResourceSource().collect(server);
+            db.insertItemResources(resources);
+            LOGGER.info("Exported {} item resources in {}ms", resources.size(), System.currentTimeMillis() - resourcesStart);
             
             long totalTime = System.currentTimeMillis() - startTime;
             LOGGER.info("Export completed in {}ms", totalTime);

@@ -1,6 +1,7 @@
 package io.github.aeroseira.delightify_exporter.db;
 
 import com.mojang.logging.LogUtils;
+import io.github.aeroseira.delightify_exporter.model.ItemResourceRow;
 import io.github.aeroseira.delightify_exporter.model.ItemRow;
 import io.github.aeroseira.delightify_exporter.model.ItemTagRow;
 import io.github.aeroseira.delightify_exporter.model.ModRow;
@@ -127,6 +128,10 @@ public class SqliteDatabase implements AutoCloseable {
             stmt.execute(Schema.createRecipesTable());
             stmt.execute(Schema.createRecipesTypeIdIndex());
             stmt.execute(Schema.createRecipesModidIndex());
+            
+            // Item resources table
+            stmt.execute(Schema.createItemResourcesTable());
+            stmt.execute(Schema.createItemResourcesIndex());
         }
         
         // Insert schema version
@@ -225,6 +230,28 @@ public class SqliteDatabase implements AutoCloseable {
             connection.setAutoCommit(true);
         }
         LOGGER.info("Inserted {} recipes", recipes.size());
+    }
+
+    public void insertItemResources(List<ItemResourceRow> resources) throws SQLException {
+        connection.setAutoCommit(false);
+        try (PreparedStatement ps = connection.prepareStatement(Schema.insertItemResource())) {
+            for (ItemResourceRow resource : resources) {
+                ps.setString(1, resource.itemId());
+                ps.setString(2, resource.resourceType());
+                ps.setString(3, resource.namespace());
+                ps.setString(4, resource.path());
+                ps.setString(5, resource.content());
+                ps.addBatch();
+            }
+            ps.executeBatch();
+            connection.commit();
+        } catch (SQLException e) {
+            connection.rollback();
+            throw e;
+        } finally {
+            connection.setAutoCommit(true);
+        }
+        LOGGER.info("Inserted {} item resources", resources.size());
     }
 
     @Override

@@ -55,6 +55,25 @@
 ### recipe_outputs
 - `recipe_outputs(recipe_id TEXT, slot INTEGER, item_id TEXT, count INTEGER, nbt_json TEXT, PRIMARY KEY(recipe_id, slot, item_id, nbt_json))`
 
+## v2: 物品资源元数据
+### item_resources
+存储物品资源文件标识符，供外部工具解析：
+- `item_resources(item_id TEXT, resource_type TEXT, namespace TEXT, path TEXT, content TEXT, PRIMARY KEY (item_id, resource_type, namespace, path))`
+
+**resource_type 类型：**
+- `lang_name`: 本地化显示名称，content=文本内容
+- `model`: 模型文件路径，content=父模型路径（可选）
+- `texture`: 材质文件路径，content=纹理变量名（如layer0）
+- `model_generated`: 生成的默认模型标记
+
+**path 格式示例：**
+- `models/item/diamond.json`
+- `textures/item/diamond.png`
+- `lang/en_us.json`
+
+索引建议：
+- `CREATE INDEX idx_item_resources_item_id ON item_resources(item_id);`
+
 ## 稳定主键与 hash
 - `item_id` / `tag_id` / `recipe_id` 都使用 `namespace:path`。
 - `hash` 用于对比快照/增量更新：对（type_id + 解析后的结构或基础字段）做 hash。
