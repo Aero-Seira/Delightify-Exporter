@@ -1,0 +1,3 @@
+ext.pathMapper = [:]
+ext.pathMapper.put("<<target java executable path>>", '/home/aeroseira/.sdkman/candidates/java/17.0.18-zulu/bin/java')
+ext.mapPath = { path -> pathMapper.get(path) ?: path }

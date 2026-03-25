@@ -11,12 +11,12 @@ import io.github.aeroseira.delightify_exporter.source.ItemTagSource;
 import io.github.aeroseira.delightify_exporter.source.ModListSource;
 import io.github.aeroseira.delightify_exporter.source.RecipeSource;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.world.level.storage.LevelResource;
 import net.minecraftforge.fml.ModList;
 import org.slf4j.Logger;
 
 import java.nio.file.Path;
 import java.time.Instant;
+import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 
@@ -24,15 +24,17 @@ public class ExporterService {
 
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final String OUTPUT_DIR = "delightify-exporter";
-    private static final String DB_FILE = "export.sqlite";
+    private static final DateTimeFormatter FILE_NAME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss");
 
     public void dump(MinecraftServer server) {
         long startTime = System.currentTimeMillis();
         
-        // 确定输出路径: <world>/delightify-exporter/export.sqlite
-        Path worldPath = server.getWorldPath(LevelResource.ROOT);
-        Path outputDir = worldPath.resolve(OUTPUT_DIR);
-        Path dbPath = outputDir.resolve(DB_FILE);
+        // 确定输出路径: <game_root>/delightify-exporter/export_<timestamp>.sqlite
+        Path gameRoot = server.getServerDirectory();
+        Path outputDir = gameRoot.resolve(OUTPUT_DIR);
+        String timestamp = LocalDateTime.now().format(FILE_NAME_FORMATTER);
+        String dbFileName = "export_" + timestamp + ".sqlite";
+        Path dbPath = outputDir.resolve(dbFileName);
         
         LOGGER.info("Starting export to: {}", dbPath);
         

@@ -2,7 +2,7 @@ package io.github.aeroseira.delightify_exporter;
 
 import com.mojang.logging.LogUtils;
 import io.github.aeroseira.delightify_exporter.command.ExportCommand;
-import io.github.aeroseira.delightify_exporter.export.ExporterService;
+
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.RegisterCommandsEvent;
 import net.minecraftforge.event.server.ServerStartedEvent;
@@ -39,16 +39,9 @@ public class DelightifyExporter {
 
     @SubscribeEvent
     public void onServerStarted(ServerStartedEvent event) {
-        LOGGER.info("DelightifyExporter ready on server - running auto-export test");
-        
-        // 自动执行一次导出测试
-        try {
-            ExporterService exporter = new ExporterService();
-            exporter.dump(event.getServer());
-            LOGGER.info("Auto-export test completed successfully");
-        } catch (Exception e) {
-            LOGGER.error("Auto-export test failed", e);
-        }
+        LOGGER.info("DelightifyExporter ready on server");
+        LOGGER.info("Use '/delightify_export dump' command to export data");
+        // 注意：自动导出已禁用，请使用命令手动导出以避免服务器启动时的问题
     }
 
     @SubscribeEvent

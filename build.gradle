@@ -64,6 +64,9 @@ dependencies {
     
     // SQLite JDBC driver - will be included in the jar
     implementation 'org.xerial:sqlite-jdbc:3.44.1.0'
+    
+    // Forge Gradle 开发环境运行时库
+    minecraftLibrary 'org.xerial:sqlite-jdbc:3.44.1.0'
 }
 
 tasks.named('processResources', ProcessResources).configure {
@@ -104,3 +107,5 @@ tasks.named('jar', Jar).configure {
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
+
+
