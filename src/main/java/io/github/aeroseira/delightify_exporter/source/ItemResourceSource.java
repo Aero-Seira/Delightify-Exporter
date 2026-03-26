@@ -5,32 +5,60 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mojang.logging.LogUtils;
 import io.github.aeroseira.delightify_exporter.model.ItemResourceRow;
+import net.minecraft.client.Minecraft;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.block.Block;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.fml.loading.FMLEnvironment;
 import net.minecraftforge.registries.ForgeRegistries;
 import org.slf4j.Logger;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 /**
  * 收集物品资源文件元数据（供外部工具解析）
+ * 特别处理方块类物品，提取正面顶层材质
  */
 public class ItemResourceSource {
 
     private static final Logger LOGGER = LogUtils.getLogger();
+    
+    // 最大资源文件大小限制 (1MB)
+    private static final int MAX_RESOURCE_SIZE = 1024 * 1024;
+    
+    // 标记是否在物理客户端
+    private final boolean isPhysicalClient;
+    
+    // 缓存已经处理过的材质，避免重复
+    private final java.util.Set<String> processedTextures = new java.util.HashSet<>();
+    
+    public ItemResourceSource() {
+        this.isPhysicalClient = FMLEnvironment.dist == Dist.CLIENT;
+        LOGGER.info("ItemResourceSource initialized, isPhysicalClient={}", isPhysicalClient);
+    }
 
     public List<ItemResourceRow> collect(MinecraftServer server) {
         List<ItemResourceRow> resources = new ArrayList<>();
+        int processedCount = 0;
+        int successCount = 0;
+        
+        LOGGER.info("Starting item resource collection...");
         
         for (Item item : BuiltInRegistries.ITEM) {
             ResourceLocation itemId = BuiltInRegistries.ITEM.getKey(item);
@@ -40,17 +68,48 @@ public class ItemResourceSource {
             String modid = itemId.getNamespace();
             String path = itemId.getPath();
             
+            processedCount++;
+            
             try {
-                // 1. 收集本地化名称
-                collectLocalization(resources, itemIdStr, modid, path, server);
+                int beforeCount = resources.size();
                 
-                // 2. 收集模型文件信息
-                collectModelInfo(resources, itemIdStr, modid, path, server);
+                // 1. 收集本地化名称
+                collectLocalization(resources, itemIdStr, modid, path, item);
+                
+                // 2. 收集模型文件信息（传入 Item 对象以便判断是否为方块）
+                collectModelInfo(resources, itemIdStr, modid, path, server, item);
+                
+                if (resources.size() > beforeCount) {
+                    successCount++;
+                }
+                
+                // 每处理100个物品打印一次进度
+                if (processedCount % 100 == 0) {
+                    LOGGER.debug("Processed {} items, collected {} resources", processedCount, resources.size());
+                }
                 
             } catch (Exception e) {
-                LOGGER.debug("Failed to collect resources for item {}: {}", itemIdStr, e.getMessage());
+                LOGGER.warn("Failed to collect resources for item {}: {}", itemIdStr, e.getMessage(), e);
             }
         }
+        
+        LOGGER.info("Resource collection complete: {} items processed, {} items with resources, {} total resources", 
+            processedCount, successCount, resources.size());
+        
+        // 统计各类型资源数量
+        long langCount = resources.stream().filter(r -> r.resourceType().equals("lang_name")).count();
+        long langKeyCount = resources.stream().filter(r -> r.resourceType().equals("lang_key")).count();
+        long modelCount = resources.stream().filter(r -> r.resourceType().equals("model")).count();
+        long modelPathCount = resources.stream().filter(r -> r.resourceType().equals("model_path")).count();
+        long modelGenCount = resources.stream().filter(r -> r.resourceType().equals("model_generated")).count();
+        long modelParentCount = resources.stream().filter(r -> r.resourceType().equals("model_parent")).count();
+        long textureCount = resources.stream().filter(r -> r.resourceType().equals("texture")).count();
+        long texturePathCount = resources.stream().filter(r -> r.resourceType().equals("texture_path")).count();
+        LOGGER.info("Resource breakdown:");
+        LOGGER.info("  - Localization: {} names, {} keys", langCount, langKeyCount);
+        LOGGER.info("  - Models: {} files, {} paths, {} generated, {} parents", 
+            modelCount, modelPathCount, modelGenCount, modelParentCount);
+        LOGGER.info("  - Textures: {} files, {} paths", textureCount, texturePathCount);
         
         return resources;
     }
@@ -58,107 +117,360 @@ public class ItemResourceSource {
     /**
      * 收集物品的本地化显示名称
      */
-    private void collectLocalization(List<ItemResourceRow> resources, String itemId, String modid, String path, MinecraftServer server) {
-        // 构建翻译键: item.<modid>.<path>
-        String translationKey = "item." + modid + "." + path;
-        
-        // 获取英文本地化
-        String enName = getTranslation(server, translationKey, "en_us");
-        if (enName != null && !enName.equals(translationKey)) {
-            resources.add(new ItemResourceRow(itemId, "lang_name", modid, "lang/en_us.json", enName));
-        }
-        
-        // 获取中文本地化（如果有）
-        String zhName = getTranslation(server, translationKey, "zh_cn");
-        if (zhName != null && !zhName.equals(translationKey) && !zhName.equals(enName)) {
-            resources.add(new ItemResourceRow(itemId, "lang_name", modid, "lang/zh_cn.json", zhName));
-        }
-        
-        // 如果没有找到本地化，使用路径作为备用
-        if (enName == null || enName.equals(translationKey)) {
-            resources.add(new ItemResourceRow(itemId, "lang_name", modid, "lang/fallback", path));
-        }
-    }
-
-    /**
-     * 从语言文件获取翻译
-     */
-    private String getTranslation(MinecraftServer server, String key, String langCode) {
+    private void collectLocalization(List<ItemResourceRow> resources, String itemId, String modid, String path, Item item) {
         try {
-            // 使用 Minecraft 的翻译系统
-            var registryAccess = server.registryAccess();
-            // 直接返回 key，让外部工具自己解析语言文件
-            return key;
-        } catch (Exception e) {
-            return key;
-        }
-    }
-
-    /**
-     * 收集物品的模型文件信息
-     */
-    private void collectModelInfo(List<ItemResourceRow> resources, String itemId, String modid, String path, MinecraftServer server) {
-        // 构建模型路径: assets/<modid>/models/item/<path>.json
-        String modelPath = "models/item/" + path + ".json";
-        ResourceLocation modelLocation = new ResourceLocation(modid, modelPath);
-        
-        // 记录模型文件路径
-        resources.add(new ItemResourceRow(itemId, "model", modid, modelPath, null));
-        
-        // 尝试读取模型文件获取材质信息
-        try {
-            Optional<InputStream> resource = server.getResourceManager()
-                .getResource(new ResourceLocation(modid, modelPath))
-                .map(r -> {
-                    try {
-                        return r.open();
-                    } catch (IOException e) {
-                        return null;
-                    }
-                });
+            // 通过 ItemStack 获取显示名称（使用当前语言环境）
+            ItemStack stack = new ItemStack(item);
+            Component displayName = stack.getHoverName();
+            String name = displayName.getString();
             
-            if (resource.isPresent() && resource.get() != null) {
-                try (InputStream stream = resource.get();
-                     BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
-                    
-                    JsonObject modelJson = JsonParser.parseReader(reader).getAsJsonObject();
-                    
-                    // 获取父模型（如果有）
-                    if (modelJson.has("parent")) {
-                        String parent = modelJson.get("parent").getAsString();
-                        resources.add(new ItemResourceRow(itemId, "model_parent", modid, modelPath, parent));
-                    }
-                    
-                    // 获取纹理映射
-                    if (modelJson.has("textures")) {
-                        JsonObject textures = modelJson.getAsJsonObject("textures");
-                        for (Map.Entry<String, JsonElement> entry : textures.entrySet()) {
-                            String textureVar = entry.getKey();
-                            String texturePath = entry.getValue().getAsString();
-                            
-                            // 解析完整材质路径
-                            String fullTexturePath = resolveTexturePath(texturePath);
-                            resources.add(new ItemResourceRow(
-                                itemId, 
-                                "texture", 
-                                fullTexturePath.split(":")[0], 
-                                "textures/" + fullTexturePath.split(":", 2)[1] + ".png",
-                                textureVar
-                            ));
-                        }
-                    }
-                    
+            if (name != null && !name.isEmpty()) {
+                resources.add(new ItemResourceRow(itemId, "lang_name", modid, "lang/current", name));
+                LOGGER.debug("Found display name for {}: {}", itemId, name);
+            }
+            
+            // 同时记录翻译键，方便外部工具查找
+            String translationKey = item.getDescriptionId();
+            resources.add(new ItemResourceRow(itemId, "lang_key", modid, "lang/key", translationKey));
+            
+        } catch (Exception e) {
+            LOGGER.debug("Failed to get localization for {}: {}", itemId, e.getMessage());
+        }
+    }
+
+    /**
+     * 读取资源文件内容为字符串
+     * 在物理客户端会使用客户端资源管理器
+     */
+    private String readResourceFile(MinecraftServer server, String namespace, String path) {
+        try {
+            ResourceLocation resourceLocation = ResourceLocation.fromNamespaceAndPath(namespace, path);
+            LOGGER.debug("Attempting to read resource: {}", resourceLocation);
+            
+            // 首先尝试使用服务端资源管理器
+            var optionalResource = server.getResourceManager().getResource(resourceLocation);
+            
+            // 如果在物理客户端且服务端找不到，尝试使用客户端资源管理器
+            if (optionalResource.isEmpty() && isPhysicalClient) {
+                try {
+                    var clientResourceManager = Minecraft.getInstance().getResourceManager();
+                    optionalResource = clientResourceManager.getResource(resourceLocation);
+                    LOGGER.debug("Using client resource manager for {}", resourceLocation);
                 } catch (Exception e) {
-                    LOGGER.debug("Failed to parse model file for {}: {}", itemId, e.getMessage());
+                    LOGGER.debug("Client resource manager also failed for {}: {}", resourceLocation, e.getMessage());
                 }
-            } else {
-                // 模型文件不存在，可能是继承默认模型
-                // 记录生成的默认模型路径
-                resources.add(new ItemResourceRow(itemId, "model_generated", modid, modelPath, "builtin/generated"));
+            }
+            
+            if (optionalResource.isEmpty()) {
+                LOGGER.debug("Resource not found: {}/{}", namespace, path);
+                return null;
+            }
+            
+            var resource = optionalResource.get();
+            try (InputStream stream = resource.open();
+                 BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+                StringBuilder content = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    content.append(line).append("\n");
+                }
+                String result = content.toString();
+                LOGGER.debug("Successfully read resource {}/{} ({} chars)", namespace, path, result.length());
+                return result;
             }
         } catch (Exception e) {
-            LOGGER.debug("Failed to load model for {}: {}", itemId, e.getMessage());
+            LOGGER.debug("Failed to read resource file {}/{}: {}", namespace, path, e.getMessage());
         }
+        return null;
+    }
+
+    /**
+     * 收集物品的模型文件和材质路径信息
+     * 特别处理方块类物品，提取正面顶层材质
+     */
+    private void collectModelInfo(List<ItemResourceRow> resources, String itemId, String modid, String path, 
+                                  MinecraftServer server, Item item) {
+        // 检查是否是方块物品
+        boolean isBlockItem = item instanceof BlockItem;
+        
+        if (isBlockItem) {
+            // 对于方块物品，尝试从 blockstate 获取模型
+            collectBlockModelInfo(resources, itemId, modid, path, server);
+        } else {
+            // 对于普通物品，使用标准物品模型路径
+            collectItemModelInfo(resources, itemId, modid, path, server);
+        }
+    }
+    
+    /**
+     * 收集方块类物品的模型信息
+     * 优先提取正面顶层材质
+     */
+    private void collectBlockModelInfo(List<ItemResourceRow> resources, String itemId, String modid, String path, 
+                                       MinecraftServer server) {
+        // 1. 首先尝试读取 blockstate 文件
+        String blockstatePath = "blockstates/" + path + ".json";
+        String blockstateContent = readResourceFile(server, modid, blockstatePath);
+        
+        String modelPath = null;
+        
+        if (blockstateContent != null) {
+            LOGGER.debug("Found blockstate for {}: {}", itemId, blockstatePath);
+            resources.add(new ItemResourceRow(itemId, "blockstate", modid, blockstatePath, blockstateContent));
+            
+            // 解析 blockstate 获取默认模型
+            modelPath = parseBlockstateForModel(blockstateContent);
+        }
+        
+        // 如果没有找到 blockstate 或无法解析，使用默认方块模型路径
+        if (modelPath == null) {
+            modelPath = "models/block/" + path + ".json";
+        }
+        
+        // 2. 读取模型文件并提取材质
+        extractModelTextures(resources, itemId, modid, path, modelPath, server, true);
+    }
+    
+    /**
+     * 收集普通物品的模型信息
+     */
+    private void collectItemModelInfo(List<ItemResourceRow> resources, String itemId, String modid, String path, 
+                                      MinecraftServer server) {
+        String modelPath = "models/item/" + path + ".json";
+        extractModelTextures(resources, itemId, modid, path, modelPath, server, false);
+    }
+    
+    /**
+     * 从 blockstate JSON 解析默认模型路径
+     */
+    private String parseBlockstateForModel(String blockstateContent) {
+        try {
+            JsonObject json = JsonParser.parseString(blockstateContent).getAsJsonObject();
+            
+            // 优先查找 "variants" -> "" (默认变体)
+            if (json.has("variants")) {
+                JsonObject variants = json.getAsJsonObject("variants");
+                if (variants.has("")) {
+                    JsonElement defaultVariant = variants.get("");
+                    if (defaultVariant.isJsonObject()) {
+                        JsonObject variantObj = defaultVariant.getAsJsonObject();
+                        if (variantObj.has("model")) {
+                            String modelRef = variantObj.get("model").getAsString();
+                            // 转换引用为路径: "minecraft:block/stone" -> "models/block/stone.json"
+                            return "models/" + modelRef.replace(":", "/") + ".json";
+                        }
+                    }
+                }
+            }
+            
+            // 查找 multipart 的第一个 apply
+            if (json.has("multipart")) {
+                // multipart 复杂，返回 null 让调用者使用默认路径
+                return null;
+            }
+        } catch (Exception e) {
+            LOGGER.debug("Failed to parse blockstate: {}", e.getMessage());
+        }
+        return null;
+    }
+    
+    /**
+     * 从模型文件中提取纹理
+     * @param isBlock 是否是方块（影响材质选择策略）
+     */
+    private void extractModelTextures(List<ItemResourceRow> resources, String itemId, String modid, String itemPath,
+                                      String modelPath, MinecraftServer server, boolean isBlock) {
+        LOGGER.debug("Extracting textures for {} from model: {}", itemId, modelPath);
+        
+        // 导出模型路径
+        resources.add(new ItemResourceRow(itemId, "model_path", modid, modelPath,
+            "assets/" + modid + "/" + modelPath));
+        
+        String modelContent = readResourceFile(server, modid, modelPath);
+        
+        if (modelContent != null) {
+            resources.add(new ItemResourceRow(itemId, "model", modid, modelPath, modelContent));
+            
+            try {
+                JsonObject modelJson = JsonParser.parseString(modelContent).getAsJsonObject();
+                
+                // 处理父模型继承
+                if (modelJson.has("parent")) {
+                    String parent = modelJson.get("parent").getAsString();
+                    resources.add(new ItemResourceRow(itemId, "model_parent", modid, modelPath, parent));
+                    
+                    // 如果是 cube 或 block 相关父模型，需要特殊处理
+                    if (parent.contains("cube") || parent.contains("block")) {
+                        // 尝试从父模型获取更多纹理信息
+                        String parentPath = "models/" + parent.replace(":", "/") + ".json";
+                        String parentContent = readResourceFile(server, 
+                            parent.contains(":") ? parent.split(":")[0] : modid, parentPath);
+                        
+                        if (parentContent != null && !modelJson.has("textures")) {
+                            // 如果当前模型没有 textures，使用父模型的
+                            JsonObject parentJson = JsonParser.parseString(parentContent).getAsJsonObject();
+                            if (parentJson.has("textures")) {
+                                modelJson.add("textures", parentJson.get("textures"));
+                            }
+                        }
+                    }
+                }
+                
+                // 提取并处理纹理
+                if (modelJson.has("textures")) {
+                    JsonObject textures = modelJson.getAsJsonObject("textures");
+                    
+                    // 根据是否是方块选择不同的材质提取策略
+                    String selectedTexture = selectBestTexture(textures, isBlock);
+                    
+                    if (selectedTexture != null) {
+                        // 解析完整材质路径
+                        String fullTexturePath = resolveTexturePath(selectedTexture);
+                        String textureNamespace = fullTexturePath.split(":")[0];
+                        String textureName = fullTexturePath.split(":", 2)[1];
+                        String textureRelativePath = "textures/" + textureName + ".png";
+                        
+                        // 导出主要纹理路径
+                        resources.add(new ItemResourceRow(
+                            itemId,
+                            "texture_main",
+                            textureNamespace,
+                            textureRelativePath,
+                            isBlock ? "top/north" : "layer0"
+                        ));
+                        
+                        // 读取主要材质文件
+                        String textureBase64 = readTextureAsBase64(server, textureNamespace, textureRelativePath);
+                        if (textureBase64 != null) {
+                            LOGGER.info("Loaded main texture for {}: {} chars base64", itemId, textureBase64.length());
+                            resources.add(new ItemResourceRow(
+                                itemId,
+                                "texture",
+                                textureNamespace,
+                                textureRelativePath,
+                                textureBase64
+                            ));
+                        }
+                        
+                        // 记录已处理的材质
+                        processedTextures.add(textureNamespace + ":" + textureName);
+                    }
+                    
+                    // 导出所有纹理路径供参考
+                    for (Map.Entry<String, JsonElement> entry : textures.entrySet()) {
+                        String textureVar = entry.getKey();
+                        String texturePath = entry.getValue().getAsString();
+                        String fullPath = resolveTexturePath(texturePath);
+                        String ns = fullPath.split(":")[0];
+                        String tp = "textures/" + fullPath.split(":", 2)[1] + ".png";
+                        
+                        resources.add(new ItemResourceRow(
+                            itemId,
+                            "texture_path",
+                            ns,
+                            tp,
+                            textureVar
+                        ));
+                    }
+                }
+            } catch (Exception e) {
+                LOGGER.debug("Failed to parse model for {}: {}", itemId, e.getMessage());
+            }
+        } else {
+            // 模型不存在，使用默认路径
+            LOGGER.debug("Model not found for {}, using fallback", itemId);
+            resources.add(new ItemResourceRow(itemId, "model_generated", modid, modelPath, "builtin/generated"));
+            
+            // 默认纹理路径
+            String defaultPath = isBlock ? "textures/block/" + itemPath + ".png" : "textures/item/" + itemPath + ".png";
+            resources.add(new ItemResourceRow(itemId, "texture_path", modid, defaultPath, "default"));
+        }
+    }
+    
+    /**
+     * 从纹理映射中选择最佳材质
+     * 对于方块：优先 north（正面）> up（顶层）> side > all > particle > 第一个
+     * 对于物品：优先 layer0 > 第一个
+     */
+    private String selectBestTexture(JsonObject textures, boolean isBlock) {
+        if (isBlock) {
+            // 方块材质优先级 - 正面(north)优先级最高，方便展示
+            String[] priority = {"north", "south", "east", "west", "side", "up", "top", "down", "bottom", "all", "particle", "end", "cross"};
+            for (String key : priority) {
+                if (textures.has(key)) {
+                    LOGGER.debug("Selected block texture: {}", key);
+                    return textures.get(key).getAsString();
+                }
+            }
+        } else {
+            // 物品材质优先级
+            if (textures.has("layer0")) {
+                return textures.get("layer0").getAsString();
+            }
+        }
+        
+        // 默认返回第一个可用的
+        for (Map.Entry<String, JsonElement> entry : textures.entrySet()) {
+            return entry.getValue().getAsString();
+        }
+        
+        return null;
+    }
+
+    /**
+     * 读取材质图片文件并转为 Base64 字符串
+     * 在物理客户端会使用客户端资源管理器
+     */
+    private String readTextureAsBase64(MinecraftServer server, String namespace, String path) {
+        try {
+            ResourceLocation resourceLocation = ResourceLocation.fromNamespaceAndPath(namespace, path);
+            LOGGER.debug("Attempting to read texture: {}", resourceLocation);
+            
+            // 首先尝试使用服务端资源管理器
+            var optionalResource = server.getResourceManager().getResource(resourceLocation);
+            
+            // 如果在物理客户端且服务端找不到，尝试使用客户端资源管理器
+            if (optionalResource.isEmpty() && isPhysicalClient) {
+                try {
+                    var clientResourceManager = Minecraft.getInstance().getResourceManager();
+                    optionalResource = clientResourceManager.getResource(resourceLocation);
+                    LOGGER.debug("Using client resource manager for texture {}", resourceLocation);
+                } catch (Exception e) {
+                    LOGGER.debug("Client resource manager also failed for texture {}: {}", resourceLocation, e.getMessage());
+                }
+            }
+            
+            if (optionalResource.isEmpty()) {
+                LOGGER.debug("Texture not found: {}/{}", namespace, path);
+                return null;
+            }
+            
+            var resource = optionalResource.get();
+            try (InputStream stream = resource.open();
+                 ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+                
+                byte[] buffer = new byte[8192];
+                int bytesRead;
+                int totalBytes = 0;
+                
+                while ((bytesRead = stream.read(buffer)) != -1) {
+                    totalBytes += bytesRead;
+                    if (totalBytes > MAX_RESOURCE_SIZE) {
+                        LOGGER.warn("Texture file {}/{} exceeds size limit (>{}, skipping", namespace, path, MAX_RESOURCE_SIZE);
+                        return null;
+                    }
+                    baos.write(buffer, 0, bytesRead);
+                }
+                
+                String base64 = Base64.getEncoder().encodeToString(baos.toByteArray());
+                LOGGER.info("Successfully read texture {}/{} ({} bytes -> {} base64 chars)", 
+                    namespace, path, totalBytes, base64.length());
+                return base64;
+            }
+        } catch (Exception e) {
+            LOGGER.debug("Failed to read texture file {}/{}: {}", namespace, path, e.getMessage());
+        }
+        return null;
     }
 
     /**

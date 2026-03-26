@@ -2,7 +2,7 @@ package io.github.aeroseira.delightify_exporter.db;
 
 public class Schema {
 
-    public static final int CURRENT_VERSION = 2;
+    public static final int CURRENT_VERSION = 3;
 
     public static String createSchemaVersionTable() {
         return """
@@ -103,7 +103,7 @@ public class Schema {
         return "CREATE INDEX IF NOT EXISTS idx_recipes_modid ON recipes(modid)";
     }
 
-    // Item Resources 表 - 存储物品资源文件元数据
+    // Item Resources 表 - 存储物品资源文件内容
     public static String createItemResourcesTable() {
         return """
             CREATE TABLE IF NOT EXISTS item_resources (
