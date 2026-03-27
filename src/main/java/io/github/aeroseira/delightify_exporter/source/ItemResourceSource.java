@@ -294,26 +294,20 @@ public class ItemResourceSource {
             try {
                 JsonObject modelJson = JsonParser.parseString(modelContent).getAsJsonObject();
                 
-                // 处理父模型继承
+                // 递归解析 parent 链获取 textures
+                JsonObject resolvedTextures = resolveTexturesFromParentChain(
+                    server, modid, modelJson, new java.util.HashSet<>()
+                );
+                
+                // 如果解析到了 textures，添加到当前 modelJson 以便后续处理
+                if (resolvedTextures != null && resolvedTextures.size() > 0) {
+                    modelJson.add("textures", resolvedTextures);
+                }
+                
+                // 处理父模型引用（记录 parent 信息）
                 if (modelJson.has("parent")) {
                     String parent = modelJson.get("parent").getAsString();
                     resources.add(new ItemResourceRow(itemId, "model_parent", modid, modelPath, parent));
-                    
-                    // 如果是 cube 或 block 相关父模型，需要特殊处理
-                    if (parent.contains("cube") || parent.contains("block")) {
-                        // 尝试从父模型获取更多纹理信息
-                        String parentPath = "models/" + parent.replace(":", "/") + ".json";
-                        String parentContent = readResourceFile(server, 
-                            parent.contains(":") ? parent.split(":")[0] : modid, parentPath);
-                        
-                        if (parentContent != null && !modelJson.has("textures")) {
-                            // 如果当前模型没有 textures，使用父模型的
-                            JsonObject parentJson = JsonParser.parseString(parentContent).getAsJsonObject();
-                            if (parentJson.has("textures")) {
-                                modelJson.add("textures", parentJson.get("textures"));
-                            }
-                        }
-                    }
                 }
                 
                 // 提取并处理纹理
@@ -384,6 +378,79 @@ public class ItemResourceSource {
             // 默认纹理路径
             String defaultPath = isBlock ? "textures/block/" + itemPath + ".png" : "textures/item/" + itemPath + ".png";
             resources.add(new ItemResourceRow(itemId, "texture_path", modid, defaultPath, "default"));
+        }
+    }
+    
+    /**
+     * 递归解析 parent 模型链，获取 textures
+     * @param server Minecraft 服务器
+     * @param currentNamespace 当前模型所在的命名空间
+     * @param currentModelJson 当前模型 JSON
+     * @param visited 已访问的模型路径（防止循环引用）
+     * @return 解析到的 textures，如果没有则返回 null
+     */
+    private JsonObject resolveTexturesFromParentChain(MinecraftServer server, String currentNamespace, 
+                                                       JsonObject currentModelJson, 
+                                                       java.util.Set<String> visited) {
+        // 如果当前模型有 textures，直接返回
+        if (currentModelJson.has("textures")) {
+            return currentModelJson.getAsJsonObject("textures");
+        }
+        
+        // 如果没有 parent，无法继续解析
+        if (!currentModelJson.has("parent")) {
+            return null;
+        }
+        
+        String parentRef = currentModelJson.get("parent").getAsString();
+        
+        // 解析 parent 的命名空间和路径
+        String parentNamespace = currentNamespace;
+        String parentPath = parentRef;
+        
+        if (parentRef.contains(":")) {
+            String[] parts = parentRef.split(":", 2);
+            parentNamespace = parts[0];
+            parentPath = parts[1];
+        }
+        
+        // 构建完整的模型路径
+        String parentModelPath = "models/" + parentPath + ".json";
+        String visitedKey = parentNamespace + ":" + parentModelPath;
+        
+        // 检查循环引用
+        if (visited.contains(visitedKey)) {
+            LOGGER.debug("Detected circular reference in parent chain: {}", visitedKey);
+            return null;
+        }
+        
+        visited.add(visitedKey);
+        
+        // 读取 parent 模型
+        String parentContent = readResourceFile(server, parentNamespace, parentModelPath);
+        
+        if (parentContent == null) {
+            LOGGER.debug("Parent model not found: {}", visitedKey);
+            return null;
+        }
+        
+        try {
+            JsonObject parentJson = JsonParser.parseString(parentContent).getAsJsonObject();
+            
+            // 递归解析 parent 的 parent
+            JsonObject parentTextures = resolveTexturesFromParentChain(server, parentNamespace, parentJson, visited);
+            
+            // 如果 parent 有 textures，返回它们
+            if (parentTextures != null && parentTextures.size() > 0) {
+                return parentTextures;
+            }
+            
+            // 否则返回 null（继续向上查找的任务已经完成）
+            return null;
+            
+        } catch (Exception e) {
+            LOGGER.debug("Failed to parse parent model {}: {}", visitedKey, e.getMessage());
+            return null;
         }
     }
     
