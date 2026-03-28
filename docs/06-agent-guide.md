@@ -1,4 +1,4 @@
-# 06 - Agent / Vibecoding 指南（Forge 1.20.1 / Java / Server-only）
+# 06 - Agent / Vibecoding 指南（Forge 1.20.1 / Java）
 
 本文档面向协助开发的 Agent（或自动化编码工具），目标是让 Agent 在**不反复确认需求**的前提下，按固定契约与里程碑实现 Delightify-Exporter。
 
@@ -18,7 +18,11 @@
 
 ## 1. 项目目标（Goals）
 
-实现一个 **Forge 1.20.1** 的 **server-only** Mod，在服务器运行时读取整合包的**最终态（final loaded state / 最终态）**并导出到 SQLite，供外部项目渲染/查询。
+实现一个 **Forge 1.20.1** 的数据导出 Mod，在运行时读取整合包的**最终态（final loaded state / 最终态）**并导出到 SQLite，供外部项目渲染/查询。
+
+本 Mod 同时包含服务端与客户端逻辑：
+- **服务端**：导出 recipes/items/tags，适用于专用服务器与单机集成服务端。
+- **客户端**（`Dist.CLIENT`）：在单机集成服务端环境下额外导出物品贴图与配方视图布局。
 
 最终态包括：
 - 注册表（registry）中的 items（全量）
@@ -29,8 +33,9 @@
 
 ## 2. 非目标（Non-goals, 目前）
 
-- 不导出 JEI/REI 等客户端 GUI 数据
-- 不穷举所有 NBT 变体（NBT variants 不可穷举）
+- 不尝试穷举所有 NBT 变体（NBT variants 不可穷举）
+- 专用服务器（dedicated server）环境下不导出依赖客户端渲染 API 的内容（贴图/视图布局）
+- 配方视图导出（JEI/REI 布局）需在单机集成服务端运行，不支持纯 dedicated server（详见 `docs/08-recipe-view-export.md`）
 - 不保证所有 mod 自定义 recipe 类型都能结构化解析（先保底导出基础信息）
 
 ---
@@ -77,8 +82,11 @@
   - POJO：`ItemRow/RecipeRow/TagRow/...`
 - `io.github.aeroseira.delightify_exporter.util`
   - hash、计时器、字符串规范化等
+- `io.github.aeroseira.delightify_exporter.client` *(仅 Dist.CLIENT)*
+  - `ItemRenderHelper`：离屏 FBO 渲染物品贴图（异步批量）
+  - `RecipeViewSource`（规划中）：JEI/REI 布局采集，见 `docs/08-recipe-view-export.md`
 
-> 注意：当前仓库的 `Delightify_exporter.java` 是 Forge MDK 示例模板，包含 client setup / creative tab / example item。Exporter 为 server-only 工具型 mod，可逐步删除或隔离这些示例内容，避免误导。
+> 注意：当前仓库的 `Delightify_exporter.java` 是 Forge MDK 示例模板，包含 client setup / creative tab / example item。可逐步删除或隔离这些示例内容，避免误导；客户端渲染相关代码应放在 `client/` 包下并用 `@OnlyIn(Dist.CLIENT)` 标注。
 
 ---
 
@@ -136,11 +144,13 @@ Agent 在实现时，至少需要创建以下表：
 
 ---
 
-## 8. 实现注意事项（Forge / Server-only）
+## 8. 实现注意事项（Forge / 运行环境区分）
 
 - 命令注册要保证在 dedicated server 可用（不依赖 client classes）
 - 输出路径必须定位到 world 目录（不要写到 jar 或只写 run/ 根目录）
-- 尽量不要在导出时访问 client-only API（如 `Minecraft.getInstance()`）
+- 客户端相关代码（渲染、贴图、JEI API）必须用 `@OnlyIn(Dist.CLIENT)` 标注，并在调用前通过 `FMLEnvironment.dist == Dist.CLIENT` 检查
+- 服务端数据（recipes/items/tags）在 dedicated server 与 integrated server 下均应正常导出
+- 物品贴图渲染（`ItemRenderHelper`）和配方视图采集仅在 integrated server（物理客户端）可用；dedicated server 下跳过并记录警告日志
 
 ---
 

@@ -14,3 +14,10 @@
 - 增量导出（hash 对比）
 - 多快照（timestamp/世界维度）
 - 更多数据类型（按外部渲染需求）：fluids、loot、worldgen
+
+## Milestone 4：v3（配方视图导出）
+- 新增 `recipe_views` 表（schema 见 `docs/08-recipe-view-export.md`）
+- 客户端（integrated server）环境下通过 JEI API 采集 recipe category 布局与背景
+- 原版 recipe type 内置静态模板（crafting/smelting/stonecutting 等）
+- 专用服务器保底（写入 unavailable 行，不阻塞导出）
+- 背景 PNG 离屏渲染导出（可选，v3+）
