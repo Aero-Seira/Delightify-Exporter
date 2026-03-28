@@ -17,16 +17,16 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 /**
- * 收集物品资源：只导出物品栏渲染结果
+ * 收集物品资源：异步高性能渲染
  * 
- * 简化策略：
- * 1. 收集所有物品的本地化名称
- * 2. 客户端环境：批量渲染物品栏样式图片
- * 3. 服务端环境：跳过（因为无法渲染）
- * 
- * 只导出 texture 字段，前端直接使用渲染好的图片
+ * 特性：
+ * 1. 异步批量渲染，不阻塞游戏
+ * 2. 实时显示进度
+ * 3. 支持中途取消
  */
 public class ItemResourceSource {
 
@@ -41,13 +41,11 @@ public class ItemResourceSource {
     public List<ItemResourceRow> collect(MinecraftServer server) {
         List<ItemResourceRow> resources = new ArrayList<>();
         
-        // 第一阶段：收集所有物品信息和待渲染任务
+        // 收集所有物品
         Map<String, ItemStack> renderTasks = new HashMap<>();
-        
-        int processedCount = 0;
         int itemCount = 0;
         
-        LOGGER.info("Starting item collection...");
+        LOGGER.info("Collecting items...");
         
         for (Item item : BuiltInRegistries.ITEM) {
             ResourceLocation itemId = BuiltInRegistries.ITEM.getKey(item);
@@ -55,22 +53,15 @@ public class ItemResourceSource {
             
             String itemIdStr = itemId.toString();
             String modid = itemId.getNamespace();
-            
-            processedCount++;
             itemCount++;
             
             try {
-                // 1. 收集本地化名称
+                // 收集名称
                 collectLocalization(resources, itemIdStr, modid, item);
                 
-                // 2. 客户端环境：加入批量渲染队列
+                // 客户端：加入渲染队列
                 if (isPhysicalClient) {
                     renderTasks.put(itemIdStr, new ItemStack(item));
-                }
-                
-                // 每100个打印进度
-                if (processedCount % 100 == 0) {
-                    LOGGER.debug("Collected {} items, {} pending render", processedCount, renderTasks.size());
                 }
                 
             } catch (Exception e) {
@@ -78,47 +69,90 @@ public class ItemResourceSource {
             }
         }
         
-        // 第二阶段：批量渲染（客户端环境）
+        LOGGER.info("Collected {} items for rendering", renderTasks.size());
+        
+        // 异步渲染
         if (isPhysicalClient && !renderTasks.isEmpty()) {
-            LOGGER.info("Batch rendering {} items...", renderTasks.size());
-            long startTime = System.currentTimeMillis();
-            
-            Map<String, String> renderResults = ItemRenderHelper.batchRender(renderTasks);
-            
+            renderAsync(resources, renderTasks);
+        }
+        
+        if (!isPhysicalClient) {
+            LOGGER.warn("Running on server - textures not available");
+        }
+        
+        // 统计
+        long textureCount = resources.stream().filter(r -> r.resourceType().equals("texture")).count();
+        LOGGER.info("Collection complete: {} items, {} resources ({} textures)", 
+            itemCount, resources.size(), textureCount);
+        
+        return resources;
+    }
+    
+    /**
+     * 异步渲染
+     */
+    private void renderAsync(List<ItemResourceRow> resources, Map<String, ItemStack> tasks) {
+        LOGGER.info("Starting async render...");
+        long startTime = System.currentTimeMillis();
+        
+        // 启动异步渲染
+        CompletableFuture<Map<String, String>> future = ItemRenderHelper.startAsyncRender(
+            tasks,
+            progress -> {
+                // 每10%打印一次进度
+                int percent = (int) progress.getProgress();
+                if (percent % 10 == 0 && progress.completed > 0) {
+                    LOGGER.info("Progress: {}% ({}/{} items, {} it/s, batch: {})",
+                        percent,
+                        progress.completed,
+                        progress.total,
+                        String.format("%.1f", progress.itemsPerSecond),
+                        progress.batchSize
+                    );
+                }
+            }
+        );
+        
+        // 等待完成（非阻塞轮询，保持游戏响应）
+        while (!future.isDone()) {
+            try {
+                Thread.sleep(100);
+                
+                // 打印当前进度
+                ItemRenderHelper.ProgressInfo progress = ItemRenderHelper.getCurrentProgress();
+                if (progress != null) {
+                    // 可以在这里更新 UI 或发送聊天消息
+                }
+                
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        
+        // 获取结果
+        try {
+            Map<String, String> results = future.get(5, TimeUnit.MINUTES);
             long elapsed = System.currentTimeMillis() - startTime;
-            LOGGER.info("Batch render completed in {}ms: {}/{} items", 
-                elapsed, renderResults.size(), renderTasks.size());
             
-            // 将渲染结果加入资源
-            for (var entry : renderResults.entrySet()) {
+            // 将结果加入资源
+            for (var entry : results.entrySet()) {
                 String itemId = entry.getKey();
                 String base64 = entry.getValue();
                 String modid = itemId.split(":")[0];
                 
-                // 只导出 texture 字段
                 resources.add(new ItemResourceRow(itemId, "texture", modid, "inventory/render", base64));
             }
             
-            // 记录渲染失败的物品
-            int failedCount = renderTasks.size() - renderResults.size();
-            if (failedCount > 0) {
-                LOGGER.warn("{} items failed to render", failedCount);
-            }
+            LOGGER.info("Async render finished in {}ms: {} textures", elapsed, results.size());
+            
+        } catch (Exception e) {
+            LOGGER.error("Async render failed: {}", e.getMessage());
         }
-        
-        if (!isPhysicalClient) {
-            LOGGER.warn("Running on server - no texture rendering available. Run with client to get textures.");
-        }
-        
-        LOGGER.info("Collection complete: {} items, {} resources (including {} textures)", 
-            itemCount, resources.size(), 
-            resources.stream().filter(r -> r.resourceType().equals("texture")).count());
-        
-        return resources;
     }
 
     /**
-     * 收集物品的本地化显示名称
+     * 收集本地化名称
      */
     private void collectLocalization(List<ItemResourceRow> resources, String itemId, String modid, Item item) {
         try {

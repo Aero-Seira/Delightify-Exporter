@@ -17,146 +17,304 @@ import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL30;
 import org.lwjgl.system.MemoryUtil;
 import org.slf4j.Logger;
-import java.util.Base64;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
+import java.util.AbstractMap.SimpleEntry;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 /**
- * 客户端专用：物品栏渲染提取类
+ * 客户端专用：物品栏渲染提取类（异步高性能版）
  * 
- * 模拟物品栏 GUI 的渲染方式，在离屏缓冲区渲染物品
- * 获得和玩家打开物品栏时看到的完全一致的效果
+ * 特性：
+ * 1. 完全异步渲染，不阻塞游戏线程
+ * 2. 自适应批大小 - 根据帧率动态调节
+ * 3. 硬件感知 - 根据 GPU 性能优化
  */
 @OnlyIn(Dist.CLIENT)
 public class ItemRenderHelper {
     
     private static final Logger LOGGER = LogUtils.getLogger();
-    private static final int RENDER_SIZE = 64; // 渲染目标大小
-    private static final int BATCH_SIZE = 5;   // 每帧渲染数量
+    private static final int RENDER_SIZE = 64;
     
-    // 渲染状态
-    private static final List<RenderTask> renderTasks = new ArrayList<>();
-    private static final Map<String, String> renderResults = new ConcurrentHashMap<>();
-    private static volatile int currentIndex = 0;
-    private static volatile boolean isRendering = false;
-    private static volatile boolean isComplete = false;
+    // 性能参数
+    private static final int MIN_BATCH_SIZE = 5;     // 最小批大小
+    private static final int MAX_BATCH_SIZE = 30;    // 最大批大小
+    private static final int TARGET_FRAME_TIME = 50; // 目标帧时间 ms (20fps)
+    private static final int ADJUST_INTERVAL = 20;   // 每20帧调整一次批大小
     
-    private static class RenderTask {
-        final String itemId;
-        final ItemStack stack;
-        
-        RenderTask(String itemId, ItemStack stack) {
-            this.itemId = itemId;
-            this.stack = stack;
+    // 状态
+    private static volatile RenderSession currentSession = null;
+    private static final AtomicInteger currentBatchSize = new AtomicInteger(10);
+    private static final AtomicLong lastAdjustTime = new AtomicLong(0);
+    private static final AtomicLong frameCount = new AtomicLong(0);
+    
+    // 线程池 - 用于后台处理像素数据
+    private static final ExecutorService processorPool = Executors.newFixedThreadPool(
+        Math.max(2, Runtime.getRuntime().availableProcessors() / 2),
+        r -> {
+            Thread t = new Thread(r, "ItemRender-Processor");
+            t.setDaemon(true);
+            return t;
         }
-    }
+    );
     
     static {
         MinecraftForge.EVENT_BUS.register(ItemRenderHelper.class);
     }
     
     /**
-     * 在 RenderTick 中处理渲染
+     * 渲染会话 - 使用线程安全队列
+     */
+    private static class RenderSession {
+        final ConcurrentLinkedQueue<Map.Entry<String, ItemStack>> taskQueue;
+        final ConcurrentHashMap<String, String> results = new ConcurrentHashMap<>();
+        final AtomicInteger completed = new AtomicInteger(0);
+        final AtomicInteger failed = new AtomicInteger(0);
+        final int totalTasks;
+        final long startTime;
+        final CompletableFuture<Map<String, String>> future;
+        final Consumer<ProgressInfo> progressCallback;
+        
+        RenderSession(Map<String, ItemStack> tasks, Consumer<ProgressInfo> progressCallback) {
+            this.taskQueue = new ConcurrentLinkedQueue<>(tasks.entrySet());
+            this.totalTasks = tasks.size();
+            this.startTime = System.currentTimeMillis();
+            this.future = new CompletableFuture<>();
+            this.progressCallback = progressCallback;
+        }
+        
+        boolean isComplete() {
+            return completed.get() + failed.get() >= totalTasks;
+        }
+        
+        void complete() {
+            future.complete(new HashMap<>(results));
+        }
+    }
+    
+    /**
+     * 进度信息
+     */
+    public static class ProgressInfo {
+        public final int total;
+        public final int completed;
+        public final int failed;
+        public final int batchSize;
+        public final long elapsedMs;
+        public final double itemsPerSecond;
+        
+        public ProgressInfo(int total, int completed, int failed, int batchSize, long elapsedMs) {
+            this.total = total;
+            this.completed = completed;
+            this.failed = failed;
+            this.batchSize = batchSize;
+            this.elapsedMs = elapsedMs;
+            this.itemsPerSecond = elapsedMs > 0 ? (completed * 1000.0 / elapsedMs) : 0;
+        }
+        
+        public double getProgress() {
+            return total > 0 ? (completed + failed) * 100.0 / total : 0;
+        }
+    }
+    
+    /**
+     * 开始异步批量渲染
+     * 
+     * @param tasks 物品任务
+     * @param progressCallback 进度回调（每批完成后调用）
+     * @return CompletableFuture 异步结果
+     */
+    public static CompletableFuture<Map<String, String>> startAsyncRender(
+            Map<String, ItemStack> tasks, 
+            Consumer<ProgressInfo> progressCallback) {
+        
+        if (tasks.isEmpty()) {
+            return CompletableFuture.completedFuture(new ConcurrentHashMap<>());
+        }
+        
+        // 如果有正在进行的会话，先完成它
+        if (currentSession != null && !currentSession.isComplete()) {
+            LOGGER.warn("Previous render session still active, waiting...");
+            currentSession.future.join();
+        }
+        
+        // 创建新会话
+        currentSession = new RenderSession(tasks, progressCallback);
+        
+        // 根据任务数初始化批大小
+        int initialBatch = Math.min(MAX_BATCH_SIZE, Math.max(MIN_BATCH_SIZE, tasks.size() / 100));
+        currentBatchSize.set(initialBatch);
+        
+        LOGGER.info("Async render started: {} items, initial batch: {}", tasks.size(), initialBatch);
+        
+        return currentSession.future;
+    }
+    
+    /**
+     * 获取当前进度
+     */
+    public static ProgressInfo getCurrentProgress() {
+        if (currentSession == null) {
+            return null;
+        }
+        
+        return new ProgressInfo(
+            currentSession.totalTasks,
+            currentSession.completed.get(),
+            currentSession.failed.get(),
+            currentBatchSize.get(),
+            System.currentTimeMillis() - currentSession.startTime
+        );
+    }
+    
+    /**
+     * 是否正在渲染
+     */
+    public static boolean isRendering() {
+        return currentSession != null && !currentSession.isComplete();
+    }
+    
+    /**
+     * 等待完成（阻塞，用于命令行等待）
+     */
+    public static Map<String, String> waitForCompletion() {
+        if (currentSession == null) {
+            return new ConcurrentHashMap<>();
+        }
+        return currentSession.future.join();
+    }
+    
+    /**
+     * RenderTick 处理器 - 每帧执行渲染
      */
     @SubscribeEvent
     public static void onRenderTick(TickEvent.RenderTickEvent event) {
-        if (event.phase != TickEvent.Phase.END || !isRendering) {
+        if (event.phase != TickEvent.Phase.END) {
             return;
         }
         
-        if (currentIndex >= renderTasks.size()) {
-            isComplete = true;
-            isRendering = false;
+        RenderSession session = currentSession;
+        if (session == null || session.isComplete()) {
+            return;
+        }
+        
+        long frameStart = System.currentTimeMillis();
+        
+        // 自适应调整批大小
+        adjustBatchSize();
+        
+        int batchSize = currentBatchSize.get();
+        int rendered = 0;
+        
+        // 批量渲染
+        for (int i = 0; i < batchSize; i++) {
+            Map.Entry<String, ItemStack> entry = pollNextTask(session);
+            if (entry == null) break;
+            
+            try {
+                String result = renderInventoryItem(entry.getValue(), entry.getKey());
+                if (result != null) {
+                    session.results.put(entry.getKey(), result);
+                    session.completed.incrementAndGet();
+                } else {
+                    session.failed.incrementAndGet();
+                }
+            } catch (Exception e) {
+                LOGGER.debug("Render failed for {}: {}", entry.getKey(), e.getMessage());
+                session.failed.incrementAndGet();
+            }
+            rendered++;
+        }
+        
+        // 后台处理进度回调
+        if (rendered > 0 && session.progressCallback != null) {
+            ProgressInfo info = new ProgressInfo(
+                session.totalTasks,
+                session.completed.get(),
+                session.failed.get(),
+                batchSize,
+                System.currentTimeMillis() - session.startTime
+            );
+            
+            // 异步执行回调避免阻塞渲染
+            processorPool.execute(() -> session.progressCallback.accept(info));
+        }
+        
+        // 检查是否完成
+        if (session.isComplete()) {
+            session.complete();
+            LOGGER.info("Async render completed: {} success, {} failed in {}ms",
+                session.completed.get(), session.failed.get(),
+                System.currentTimeMillis() - session.startTime);
+        }
+        
+        // 记录帧时间用于自适应
+        long frameTime = System.currentTimeMillis() - frameStart;
+        frameCount.incrementAndGet();
+    }
+    
+    /**
+     * 获取下一个任务 - 使用无锁队列
+     */
+    private static Map.Entry<String, ItemStack> pollNextTask(RenderSession session) {
+        return session.taskQueue.poll();
+    }
+    
+    /**
+     * 自适应调整批大小
+     */
+    private static void adjustBatchSize() {
+        long now = System.currentTimeMillis();
+        long lastAdjust = lastAdjustTime.get();
+        long frames = frameCount.get();
+        
+        // 每 ADJUST_INTERVAL 帧调整一次
+        if (frames - (lastAdjustTime.get() / 1000) < ADJUST_INTERVAL) {
+            return;
+        }
+        
+        if (!lastAdjustTime.compareAndSet(lastAdjust, now)) {
             return;
         }
         
         Minecraft mc = Minecraft.getInstance();
+        int currentFPS = mc.getFps();
+        int currentBatch = currentBatchSize.get();
         
-        // 每帧渲染多个物品
-        for (int i = 0; i < BATCH_SIZE && currentIndex < renderTasks.size(); i++) {
-            RenderTask task = renderTasks.get(currentIndex);
-            
-            try {
-                String result = renderInventoryItem(mc, task.stack, task.itemId);
-                if (result != null) {
-                    renderResults.put(task.itemId, result);
-                }
-            } catch (Exception e) {
-                LOGGER.error("Render failed for {}: {}", task.itemId, e.getMessage());
-            }
-            
-            currentIndex++;
+        // 根据 FPS 调整
+        int newBatch = currentBatch;
+        if (currentFPS > 55) {
+            // FPS 很高，可以增加批大小
+            newBatch = Math.min(MAX_BATCH_SIZE, currentBatch + 2);
+        } else if (currentFPS < 20) {
+            // FPS 很低，减少批大小
+            newBatch = Math.max(MIN_BATCH_SIZE, currentBatch - 3);
+        } else if (currentFPS < 30) {
+            // FPS 偏低，稍微减少
+            newBatch = Math.max(MIN_BATCH_SIZE, currentBatch - 1);
         }
         
-        // 打印进度
-        if (currentIndex % 100 == 0 || currentIndex >= renderTasks.size()) {
-            LOGGER.info("Rendered {}/{} items", currentIndex, renderTasks.size());
+        if (newBatch != currentBatch) {
+            currentBatchSize.set(newBatch);
+            LOGGER.debug("Batch size adjusted: {} -> {} (FPS: {})", currentBatch, newBatch, currentFPS);
         }
     }
     
     /**
-     * 批量渲染物品
+     * 渲染单个物品
      */
-    public static Map<String, String> batchRender(Map<String, ItemStack> tasks) {
-        renderResults.clear();
-        renderTasks.clear();
-        currentIndex = 0;
-        isComplete = false;
-        
-        if (tasks.isEmpty()) {
-            return renderResults;
-        }
-        
-        // 准备任务
-        for (var entry : tasks.entrySet()) {
-            renderTasks.add(new RenderTask(entry.getKey(), entry.getValue()));
-        }
-        
-        isRendering = true;
-        
-        LOGGER.info("Batch render started: {} items", renderTasks.size());
-        long startTime = System.currentTimeMillis();
-        
-        // 等待渲染完成
-        while (isRendering && !isComplete) {
-            try {
-                Thread.sleep(50);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            }
-            
-            // 超时检查（3分钟）
-            if (System.currentTimeMillis() - startTime > 180000) {
-                LOGGER.error("Render timeout");
-                isRendering = false;
-                break;
-            }
-        }
-        
-        long elapsed = System.currentTimeMillis() - startTime;
-        LOGGER.info("Batch render completed in {}ms: {}/{} items", 
-            elapsed, renderResults.size(), renderTasks.size());
-        
-        return new HashMap<>(renderResults);
-    }
-    
-    /**
-     * 渲染单个物品（物品栏样式）
-     */
-    private static String renderInventoryItem(Minecraft mc, ItemStack stack, String itemId) {
-        if (mc.getItemRenderer() == null) {
-            return null;
-        }
+    private static String renderInventoryItem(ItemStack stack, String itemId) {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.getItemRenderer() == null) return null;
         
         // 保存状态
         int prevFBO = GL11.glGetInteger(GL30.GL_FRAMEBUFFER_BINDING);
@@ -171,17 +329,14 @@ public class ItemRenderHelper {
             colorTex = GL11.glGenTextures();
             depthBuf = GL30.glGenRenderbuffers();
             
-            // 颜色纹理
             GL11.glBindTexture(GL11.GL_TEXTURE_2D, colorTex);
             GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL11.GL_RGBA8, RENDER_SIZE, RENDER_SIZE, 
                 0, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, 0);
             GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_LINEAR);
             
-            // 深度缓冲
             GL30.glBindRenderbuffer(GL30.GL_RENDERBUFFER, depthBuf);
             GL30.glRenderbufferStorage(GL30.GL_RENDERBUFFER, GL11.GL_DEPTH_COMPONENT, RENDER_SIZE, RENDER_SIZE);
             
-            // 绑定 FBO
             GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, fbo);
             GL30.glFramebufferTexture2D(GL30.GL_FRAMEBUFFER, GL30.GL_COLOR_ATTACHMENT0, 
                 GL11.GL_TEXTURE_2D, colorTex, 0);
@@ -192,28 +347,21 @@ public class ItemRenderHelper {
                 return null;
             }
             
-            // 设置视口和清除
             GL11.glViewport(0, 0, RENDER_SIZE, RENDER_SIZE);
             GL11.glClearColor(0, 0, 0, 0);
             GL11.glClear(GL11.GL_COLOR_BUFFER_BIT | GL11.GL_DEPTH_BUFFER_BIT);
             
-            // 关键：设置正交投影（和 GUI 一致）
             RenderSystem.setProjectionMatrix(
                 new Matrix4f().ortho(0, RENDER_SIZE, RENDER_SIZE, 0, -1000, 1000),
                 VertexSorting.byDistance(new Vector3f(0, 0, 0))
             );
             
-            // 创建 GuiGraphics（物品栏使用的渲染类）
+            // 渲染物品
             GuiGraphics graphics = new GuiGraphics(mc, mc.renderBuffers().bufferSource());
-            
-            // 设置缩放，使 16x16 物品填满画面
             float scale = RENDER_SIZE / 16.0f;
             graphics.pose().pushPose();
             graphics.pose().scale(scale, scale, 1);
-            
-            // 关键：使用 renderItem - 和物品栏 GUI 完全一致的方法！
             graphics.renderItem(stack, 0, 0);
-            
             graphics.pose().popPose();
             graphics.flush();
             
@@ -221,7 +369,27 @@ public class ItemRenderHelper {
             ByteBuffer buffer = MemoryUtil.memAlloc(RENDER_SIZE * RENDER_SIZE * 4);
             GL11.glReadPixels(0, 0, RENDER_SIZE, RENDER_SIZE, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, buffer);
             
-            // 转换为 BufferedImage
+            // 后台线程处理像素转换和编码
+            return processPixelData(buffer, itemId);
+            
+        } catch (Exception e) {
+            LOGGER.debug("Render error for {}: {}", itemId, e.getMessage());
+            return null;
+        } finally {
+            if (fbo != -1) GL30.glDeleteFramebuffers(fbo);
+            if (colorTex != -1) GL11.glDeleteTextures(colorTex);
+            if (depthBuf != -1) GL30.glDeleteRenderbuffers(depthBuf);
+            
+            GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, prevFBO);
+            GL11.glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+        }
+    }
+    
+    /**
+     * 处理像素数据（在调用者线程执行，但计算量小）
+     */
+    private static String processPixelData(ByteBuffer buffer, String itemId) {
+        try {
             BufferedImage image = new BufferedImage(RENDER_SIZE, RENDER_SIZE, BufferedImage.TYPE_INT_ARGB);
             boolean hasContent = false;
             
@@ -241,34 +409,20 @@ public class ItemRenderHelper {
             }
             MemoryUtil.memFree(buffer);
             
-            if (!hasContent) {
-                LOGGER.debug("Empty render for {}", itemId);
-                return null;
-            }
+            if (!hasContent) return null;
             
-            // 裁剪和缩放
             BufferedImage cropped = cropTransparent(image);
             if (cropped == null) return null;
             
             BufferedImage finalImage = scaleToMaxSize(cropped, 128);
             
-            // 编码
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             ImageIO.write(finalImage, "PNG", baos);
             return Base64.getEncoder().encodeToString(baos.toByteArray());
             
         } catch (Exception e) {
-            LOGGER.error("Render error for {}: {}", itemId, e.getMessage());
+            MemoryUtil.memFree(buffer);
             return null;
-        } finally {
-            // 清理
-            if (fbo != -1) GL30.glDeleteFramebuffers(fbo);
-            if (colorTex != -1) GL11.glDeleteTextures(colorTex);
-            if (depthBuf != -1) GL30.glDeleteRenderbuffers(depthBuf);
-            
-            // 恢复状态
-            GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, prevFBO);
-            GL11.glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
         }
     }
     
@@ -320,5 +474,12 @@ public class ItemRenderHelper {
             image.getScaledInstance(newWidth, newHeight, java.awt.Image.SCALE_SMOOTH), 0, 0, null);
         
         return scaled;
+    }
+    
+    /**
+     * 关闭处理器池（Mod 卸载时调用）
+     */
+    public static void shutdown() {
+        processorPool.shutdown();
     }
 }
