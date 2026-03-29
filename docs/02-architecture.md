@@ -1,7 +1,7 @@
 # 02 - 架构（Architecture）
 
 ## 设计原则
-1. **server-only**：不依赖客户端类与渲染逻辑。
+1. **双上下文支持**：服务端逻辑（命令注册、recipe/item/tag 采集）在 dedicated server 与 integrated server 上均可运行；客户端渲染逻辑（物品贴图渲染、recipe_views 采集）仅在 `Dist.CLIENT` 下激活，通过 `@OnlyIn(Dist.CLIENT)` 与 `FMLEnvironment.dist` 隔离。
 2. **永远可导出**：任何 recipe 至少导出基础字段（id/type/source），解析失败不阻塞全量导出。
 3. **核心逻辑与平台逻辑分离**：即使目前只做 Forge，也尽量让“写库/规范化/模型”与“从 MC 取数据”分开，便于未来扩展（NeoForge / 版本簇）。
 4. **批量事务写入**：SQLite 以事务 + batch 为主，避免逐行 commit。
@@ -26,6 +26,9 @@
   - POJO：`ItemRow` / `RecipeRow` / `TagRow`...
 - `util/`
   - hash、计时、字符串规范化等
+- `client/` *(仅 Dist.CLIENT)*
+  - `ItemRenderHelper`：离屏 FBO 渲染物品贴图（异步批量）
+  - `RecipeViewSource`（规划中）：JEI/REI 布局采集，见 `docs/08-recipe-view-export.md`
 
 ## 数据流（Data Flow）
 1. 玩家/管理员执行：`/delightify_export dump`
@@ -34,7 +37,8 @@
    - 定位输出路径：`<world>/delightify-exporter/export.sqlite`
    - 打开 SQLite，创建/迁移 schema
    - 写入 `manifest` 与 `mods`
-   - 导出 items、tags、recipes
+   - 导出 items（服务端 + 客户端异步渲染贴图）、tags、recipes
+   - 若在客户端环境：采集 recipe_views（JEI/REI 布局，规划中）
    - 关闭连接，输出日志与统计
 
 ## 线程与一致性
