@@ -6,6 +6,7 @@ import io.github.aeroseira.delightify_exporter.model.ItemRow;
 import io.github.aeroseira.delightify_exporter.model.ItemTagRow;
 import io.github.aeroseira.delightify_exporter.model.ModRow;
 import io.github.aeroseira.delightify_exporter.model.RecipeRow;
+import io.github.aeroseira.delightify_exporter.model.RecipeViewRow;
 import org.slf4j.Logger;
 
 import java.nio.file.Path;
@@ -132,6 +133,11 @@ public class SqliteDatabase implements AutoCloseable {
             // Item resources table
             stmt.execute(Schema.createItemResourcesTable());
             stmt.execute(Schema.createItemResourcesIndex());
+            
+            // Recipe views table (M4)
+            stmt.execute(Schema.createRecipeViewsTable());
+            // Optional: Recipe view backgrounds table (M4+)
+            stmt.execute(Schema.createRecipeViewBackgroundsTable());
         }
         
         // Insert schema version
@@ -252,6 +258,31 @@ public class SqliteDatabase implements AutoCloseable {
             connection.setAutoCommit(true);
         }
         LOGGER.info("Inserted {} item resources", resources.size());
+    }
+
+    public void insertRecipeViews(List<RecipeViewRow> views) throws SQLException {
+        if (views.isEmpty()) {
+            return;
+        }
+        
+        connection.setAutoCommit(false);
+        try (PreparedStatement ps = connection.prepareStatement(Schema.insertRecipeView())) {
+            for (RecipeViewRow view : views) {
+                ps.setString(1, view.typeId());
+                ps.setString(2, view.layoutJson());
+                ps.setString(3, view.backgroundRef());
+                ps.setInt(4, view.version());
+                ps.addBatch();
+            }
+            ps.executeBatch();
+            connection.commit();
+        } catch (SQLException e) {
+            connection.rollback();
+            throw e;
+        } finally {
+            connection.setAutoCommit(true);
+        }
+        LOGGER.info("Inserted {} recipe views", views.size());
     }
 
     @Override

@@ -59,6 +59,16 @@ sourceSets.main.resources { srcDir 'src/generated/resources' }
 
 repositories {
     mavenCentral()
+    maven {
+        // JEI Maven
+        name = "Progwml6's maven"
+        url = "https://dvs1.progwml6.com/files/maven/"
+    }
+    maven {
+        // JEI API Maven
+        name = "BlameJared"
+        url = "https://maven.blamejared.com"
+    }
 }
 
 dependencies {
@@ -71,6 +81,11 @@ dependencies {
     
     // Forge Gradle 开发环境运行时库
     minecraftLibrary 'org.xerial:sqlite-jdbc:3.44.1.0'
+    
+    // JEI API - compile only (client-side optional dependency)
+    // 实际运行时通过反射访问，避免硬依赖
+    compileOnly "mezz.jei:jei-1.20.1-common-api:15.20.0.104"
+    compileOnly "mezz.jei:jei-1.20.1-forge-api:15.20.0.104"
 }
 
 tasks.named('processResources', ProcessResources).configure {

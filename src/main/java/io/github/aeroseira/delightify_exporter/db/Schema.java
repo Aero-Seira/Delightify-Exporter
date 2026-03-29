@@ -2,7 +2,7 @@ package io.github.aeroseira.delightify_exporter.db;
 
 public class Schema {
 
-    public static final int CURRENT_VERSION = 3;
+    public static final int CURRENT_VERSION = 4;
 
     public static String createSchemaVersionTable() {
         return """
@@ -127,5 +127,44 @@ public class Schema {
 
     public static String createItemResourcesIndex() {
         return "CREATE INDEX IF NOT EXISTS idx_item_resources_item_id ON item_resources(item_id)";
+    }
+    
+    // Recipe Views 表 - 存储配方视图的布局信息 (M4)
+    public static String createRecipeViewsTable() {
+        return """
+            CREATE TABLE IF NOT EXISTS recipe_views (
+                type_id TEXT PRIMARY KEY,
+                layout_json TEXT NOT NULL,
+                background_ref TEXT,
+                version INTEGER NOT NULL DEFAULT 1
+            )
+            """;
+    }
+    
+    public static String insertRecipeView() {
+        return """
+            INSERT OR REPLACE INTO recipe_views 
+            (type_id, layout_json, background_ref, version) 
+            VALUES (?, ?, ?, ?)
+            """;
+    }
+    
+    // 可选：Recipe View Backgrounds 表 - 存储渲染的背景 PNG (M4+)
+    public static String createRecipeViewBackgroundsTable() {
+        return """
+            CREATE TABLE IF NOT EXISTS recipe_view_backgrounds (
+                type_id TEXT PRIMARY KEY,
+                png BLOB NOT NULL,
+                sha1 TEXT NOT NULL
+            )
+            """;
+    }
+    
+    public static String insertRecipeViewBackground() {
+        return """
+            INSERT OR REPLACE INTO recipe_view_backgrounds 
+            (type_id, png, sha1) 
+            VALUES (?, ?, ?)
+            """;
     }
 }

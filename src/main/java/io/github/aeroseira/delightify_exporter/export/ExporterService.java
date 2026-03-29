@@ -7,20 +7,26 @@ import io.github.aeroseira.delightify_exporter.model.ItemRow;
 import io.github.aeroseira.delightify_exporter.model.ItemTagRow;
 import io.github.aeroseira.delightify_exporter.model.ModRow;
 import io.github.aeroseira.delightify_exporter.model.RecipeRow;
+import io.github.aeroseira.delightify_exporter.model.RecipeViewRow;
 import io.github.aeroseira.delightify_exporter.source.ItemRegistrySource;
 import io.github.aeroseira.delightify_exporter.source.ItemResourceSource;
 import io.github.aeroseira.delightify_exporter.source.ItemTagSource;
 import io.github.aeroseira.delightify_exporter.source.ModListSource;
 import io.github.aeroseira.delightify_exporter.source.RecipeSource;
 import net.minecraft.server.MinecraftServer;
+import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.fml.ModList;
+import net.minecraftforge.fml.loading.FMLEnvironment;
 import org.slf4j.Logger;
 
 import java.nio.file.Path;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 public class ExporterService {
 
@@ -77,6 +83,11 @@ public class ExporterService {
             db.insertItemResources(resources);
             LOGGER.info("Exported {} item resources in {}ms", resources.size(), System.currentTimeMillis() - resourcesStart);
             
+            // 导出配方视图 (M4)
+            long recipeViewsStart = System.currentTimeMillis();
+            exportRecipeViews(db, recipes);
+            LOGGER.info("Exported recipe views in {}ms", System.currentTimeMillis() - recipeViewsStart);
+            
             long totalTime = System.currentTimeMillis() - startTime;
             LOGGER.info("Export completed in {}ms", totalTime);
             LOGGER.info("Output: {}", dbPath);
@@ -112,5 +123,57 @@ public class ExporterService {
         
         LOGGER.info("Manifest written: mc={}, forge={}, world={}, mods={}", 
             mcVersion, forgeVersion, worldName, modCount);
+    }
+    
+    /**
+     * 导出配方视图 (M4)
+     */
+    private void exportRecipeViews(SqliteDatabase db, List<RecipeRow> recipes) throws Exception {
+        // 收集所有唯一的 type_id
+        Set<String> typeIds = recipes.stream()
+            .map(RecipeRow::typeId)
+            .collect(Collectors.toSet());
+        
+        LOGGER.info("Collecting recipe views for {} type(s)...", typeIds.size());
+        
+        List<RecipeViewRow> views;
+        
+        if (FMLEnvironment.dist == Dist.CLIENT) {
+            // 客户端：使用 JEI 采集
+            views = collectRecipeViewsClient(typeIds);
+        } else {
+            // 服务端：创建不可用的占位行
+            views = typeIds.stream()
+                .map(typeId -> RecipeViewRow.unavailable(typeId, "no_client"))
+                .toList();
+        }
+        
+        db.insertRecipeViews(views);
+    }
+    
+    /**
+     * 客户端环境下从 JEI 采集配方视图
+     */
+    private List<RecipeViewRow> collectRecipeViewsClient(Set<String> typeIds) {
+        try {
+            // 使用反射加载客户端专用的 RecipeViewSource 类
+            // 避免服务端加载时找不到客户端类
+            Class<?> clazz = Class.forName("io.github.aeroseira.delightify_exporter.client.RecipeViewSource");
+            Object source = clazz.getDeclaredConstructor().newInstance();
+            
+            @SuppressWarnings("unchecked")
+            List<RecipeViewRow> result = (List<RecipeViewRow>) clazz
+                .getMethod("collect", Set.class)
+                .invoke(source, typeIds);
+            
+            return result;
+            
+        } catch (Exception e) {
+            LOGGER.error("Failed to collect recipe views from JEI: {}", e.getMessage());
+            // 返回不可用的占位行
+            return typeIds.stream()
+                .map(typeId -> RecipeViewRow.unavailable(typeId, "collection_failed"))
+                .toList();
+        }
     }
 }

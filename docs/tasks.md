@@ -23,3 +23,23 @@
 - [ ] stonecutting 解析器
 - [ ] recipe_inputs/recipe_outputs 写入
   - 验收：外部工具可做“按 item_id 反查 recipes”
+## M3：v2（工程化）
+- [x] Schema 升级到 v4
+- [x] 新增 `recipe_views` 表
+- [x] 新增 `recipe_view_backgrounds` 表（可选）
+
+## M4：v3（配方视图导出）
+- [x] `RecipeViewRow` 数据模型
+- [x] `RecipeViewSource` 客户端采集器（@OnlyIn(Dist.CLIENT)）
+  - JEI 检测与反射采集
+  - 内置原版配方模板（crafting/smelting/stonecutting/smithing）
+  - 专用服务器保底（unavailable=true）
+- [x] `SqliteDatabase.insertRecipeViews()` 批量写入
+- [x] `ExporterService` 集成配方视图导出
+  - 从 recipes 表提取 type_id 集合
+  - 客户端环境通过反射调用 RecipeViewSource
+  - 服务端环境生成不可用占位行
+- [x] 验证：
+  - `recipe_views` 表存在且非空
+  - 原版类型有完整槽位布局
+  - 服务端导出标记为 unavailable
