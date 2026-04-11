@@ -261,16 +261,18 @@ public class SqliteDatabase implements AutoCloseable {
     }
 
     public void insertRecipeViews(List<RecipeViewRow> views) throws SQLException {
-        if (views.isEmpty()) {
+        if (views == null || views.isEmpty()) {
+            LOGGER.warn("insertRecipeViews called with empty or null list, skipping");
             return;
         }
+        LOGGER.info("Inserting {} recipe views into database...", views.size());
         
         connection.setAutoCommit(false);
         try (PreparedStatement ps = connection.prepareStatement(Schema.insertRecipeView())) {
             for (RecipeViewRow view : views) {
                 ps.setString(1, view.typeId());
                 ps.setString(2, view.layoutJson());
-                ps.setString(3, view.backgroundRef());
+                ps.setString(3, view.base64Png());
                 ps.setInt(4, view.version());
                 ps.addBatch();
             }

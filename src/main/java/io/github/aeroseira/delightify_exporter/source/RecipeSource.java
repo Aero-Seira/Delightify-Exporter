@@ -31,6 +31,9 @@ public class RecipeSource {
         List<RecipeRow> recipes = new ArrayList<>();
         RecipeManager recipeManager = server.getRecipeManager();
         
+        LOGGER.info("RecipeSource.collect: Starting collection from RecipeManager");
+        int recipeCount = 0;
+        
         // 遍历所有已知的配方 ID
         for (ResourceLocation recipeId : recipeManager.getRecipeIds().toList()) {
             try {
@@ -60,11 +63,16 @@ public class RecipeSource {
                     rawJson,
                     unparsed
                 ));
+                recipeCount++;
+                if (recipeCount <= 5) {
+                    LOGGER.debug("Processed recipe {} with type {}", recipeId, typeIdStr);
+                }
             } catch (Exception e) {
                 LOGGER.debug("Failed to process recipe {}: {}", recipeId, e.getMessage());
             }
         }
         
+        LOGGER.info("RecipeSource.collect: Collected {} recipes", recipes.size());
         return recipes;
     }
     

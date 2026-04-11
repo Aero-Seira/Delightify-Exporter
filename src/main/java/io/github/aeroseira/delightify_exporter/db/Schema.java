@@ -129,13 +129,13 @@ public class Schema {
         return "CREATE INDEX IF NOT EXISTS idx_item_resources_item_id ON item_resources(item_id)";
     }
     
-    // Recipe Views 表 - 存储配方视图的布局信息 (M4)
+    // Recipe Views 表 - 存储配方视图的布局信息和渲染图片 (M4)
     public static String createRecipeViewsTable() {
         return """
             CREATE TABLE IF NOT EXISTS recipe_views (
                 type_id TEXT PRIMARY KEY,
                 layout_json TEXT NOT NULL,
-                background_ref TEXT,
+                base64_png TEXT,
                 version INTEGER NOT NULL DEFAULT 1
             )
             """;
@@ -144,7 +144,7 @@ public class Schema {
     public static String insertRecipeView() {
         return """
             INSERT OR REPLACE INTO recipe_views 
-            (type_id, layout_json, background_ref, version) 
+            (type_id, layout_json, base64_png, version) 
             VALUES (?, ?, ?, ?)
             """;
     }
